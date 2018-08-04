@@ -1,60 +1,154 @@
 from bs4 import BeautifulSoup
-import urllib.request, json
+import urllib.request
+import json
 import datetime
+import os
+import re
 
 url_link = "http://www.moneycontrol.com/techmvc/html/earnings/earnings-calender.json"
 header = "Stock,MeetingDate\n"
-main_csv = "" + header
+stock_codes = {}
+earnings_file_name = "earnings-calender.json"
 
 
 def get_earnings_json():
-    with urllib.request.urlopen(url_link) as earnings_urlopen:
-        data = json.loads(earnings_urlopen.read().decode())
-        print(data)
-        return data
+    print("Checking if Data is Present in File \"{name}\"".format(name=earnings_file_name))
+    if os.path.isfile(earnings_file_name):
+        print("File Found. Loading data from File")
+        with open(earnings_file_name, "r") as fr:
+            json_data = fr.read()
+    else:
+        print("File not Found. Downloading data from URL")
+        with urllib.request.urlopen(url_link) as earnings_urlopen:
+            json_data = earnings_urlopen.read().decode()
+            with open(earnings_file_name, "w") as fw:
+                fw.write(json_data)
+    data = json.loads(json_data)
+    return data
+def get_result_date_string(date):
+    return datetime.datetime.strptime(date, '%Y-%m-%d').strftime('%d %b %Y')
+def get_stock_name(parser):
+    return parser.find("div", {"class": "Ohidden"}).text
+def load_stock_codes():
+    moneycontrol_stock_codes_file = "codes.csv"
+    if os.path.isfile(moneycontrol_stock_codes_file):
+        with open(moneycontrol_stock_codes_file, "r") as fr:
+            row = fr.readline().split(",")
+            stock_codes[row[0]] = row[1].lower()
+def save_stock_codes():
+    moneycontrol_stock_codes_file = "codes.csv"
+    with open(moneycontrol_stock_codes_file, "w") as fw:
+        for key,value in stock_codes.items():
+            fw.write(key + "," + value.lower() + "\n")
+def get_stock_short_name(parser):
+    href = parser.find("a")["href"]
+    if href in stock_codes:
+        short_name = stock_codes[href].lower()
+    else:
+        try:
+            with urllib.request.urlopen(href) as urlopen:
+                response = urlopen.read().decode()
+                x = re.compile("/tech_charts/bse/his/.*csv")
+                result = x.findall(response)[0].split(".")[0].split("/")[4]
+            short_name = result
+            stock_codes[href] = result.lower()
+        except Exception as e:
+            print(e)
+            return None
+    return short_name
 
 
-earnings_data = get_earnings_json()
+def parse_prices(response, result_date):
+    price_list = response.split("\n")
+    line = ''
+    count = -1
 
-for entry in earnings_data:
+    for x in range(len(price_list) - 2, 0, -1):
+        row = price_list[x].split(",")
+        price_date = row[0]
 
-    soup = BeautifulSoup(entry['issue'], 'html.parser')
+        #if 0 <= count <= 5:
+        #    count += 1
+        #    close_price = row[4]
+        #    line += price_date + "," + close_price + ","
 
-    result_date = datetime.datetime.strptime(entry['date'], '%Y-%m-%d').strftime('%d %b %Y')
-    stock = soup.find("div", {"class": "Ohidden"}).text
-    href_link = soup.find("a")["href"]
-    stock_short_name = href_link.split('/')[7]
+        if result_date >= price_date:
+            count = 0
+            y = x
+            break
 
-    if stock_short_name == 'KMB':
-        stock_short_name = "kmf"
-    exchange = "bse"
-    price_url = "http://www.moneycontrol.com/tech_charts/{exchange}/his/{name}.csv".format(exchange=exchange, name=stock_short_name.lower())
+    while 0 <= count <= 5 and y >= 0:
+        row = price_list[y].split(",")
+        price_date = row[0]
 
-    if stock_short_name == "TCS":
-        with urllib.request.urlopen(price_url) as price_urlopen:
-            line = ""
-            count = -1
+        count += 1
+        close_price = row[4]
+        line += price_date + "," + close_price + ","
+        y = y - 1
+    return line
 
-            price_data_list = price_urlopen.read().decode().split("\n")
 
-            for x in range(len(price_data_list) - 1, 0, -1):
+def get_last_5_days_price(exchg, stock_name, result_date):
+    price_file_name = "prices\\" + stock_name.lower() + ".csv"
+    line = None
 
-                row = price_data_list[x].split(",")
+    if os.path.isfile(price_file_name):
+        file_found = True
+        with open(price_file_name, "r") as fr:
+            response = fr.read()
+    else:
+        price_url = "http://www.moneycontrol.com/tech_charts/{exchange}/his/{name}.csv".format(exchange=exchg,
+                                                                                           name=stock_name.lower())
+        try:
+            with urllib.request.urlopen(price_url) as urlopen:
+                response = urlopen.read().decode()
+                with open(price_file_name, "w") as fw:
+                    fw.write(response)
 
-                price_date = row[0]
+            file_found = True
+        except:
+            file_found = False
 
-                if 0 <= count <= 5:
-                    count += 1
-                    close_price = row[4]
-                    line += price_date + "," + close_price + ","
+    if file_found:
+        line = parse_prices(response, result_date=result_date)
+    return line
 
-                if result_date == price_date:
-                    count = 0
 
-            main_csv += stock + "," + result_date + "," + line + "\n"
-    with open("abc.csv", "w") as m:
-        m.write(main_csv)
+def get_earnings_csv():
+    load_stock_codes()
+    main_csv = "" + header
+    earnings_data = get_earnings_json()
 
-    #print(href_details)
-    #print(stock)
-    #print(result_date)
+    for entry in earnings_data:
+
+        soup = BeautifulSoup(entry['issue'], 'html.parser')
+
+        result_date = get_result_date_string(entry['date'])
+        stock = get_stock_name(soup)
+        stock_short_name = get_stock_short_name(soup)
+        today = datetime.datetime.today().strftime('%d %b %y')
+
+        if result_date > today:
+            if stock_short_name:
+                line = get_last_5_days_price(stock_name=stock_short_name, exchg="nse", result_date=result_date)
+
+                if not line:
+                    line = get_last_5_days_price(stock_name=stock_short_name, exchg="bse", result_date=result_date)
+                    if not line:
+                        print("No price data found for " + stock + ":" + stock_short_name + " Ignoring the entry")
+                if line:
+                    print("Adding data for" + stock + " " + stock_short_name)
+                    main_csv += stock + "," + result_date + "," + line + "\n"
+                else:
+                    main_csv += stock + "," + result_date + "\n"
+                with open("abc.csv", "w") as m:
+                    m.write(main_csv)
+            else:
+                print("Ignoring " + stock)
+        else:
+            print("Price not discovered for" + " " + stock + " " + result_date)
+    save_stock_codes()
+
+
+if __name__ == "__main__":
+    get_earnings_csv()
